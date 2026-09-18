@@ -182,7 +182,7 @@ struct ContentView: View {
                                     .frame(width: 44, height: 64)
                             }
                             .accessibilityLabel("Redo last take")
-                            .offset(x: -31)
+                            .offset(x: -17)
                             .disabled(!camera.canRedo)
                         } else {
                             Color.clear.frame(width: 44, height: 64)
