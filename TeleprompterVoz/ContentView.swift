@@ -34,6 +34,11 @@ struct ContentView: View {
                         camera.isRecording = true
                         camera.microphoneActive = true
                         camera.voiceDetected = true
+                    } else if screenshotMode == "paused" {
+                        camera.currentWord = 12
+                        camera.isPaused = true
+                        camera.segmentCount = 2
+                        camera.status = "Paused · tap Record to continue"
                     }
                     if screenshotMode == "editor" { showEditor = true }
                     return
@@ -114,7 +119,17 @@ struct ContentView: View {
                             .background(.black.opacity(0.55), in: Circle())
                     }
                     .accessibilityLabel("Close Easy Prompt")
-                    .disabled(camera.isRecording || camera.isStarting || camera.isSaving)
+                    .disabled(camera.isRecording || camera.isStarting || camera.isSaving || camera.isPaused || camera.isFinalizingSegment)
+                }
+                if camera.segmentCount > 0 || camera.isRecording {
+                    HStack(spacing: 3) {
+                        ForEach(0..<(camera.segmentCount + (camera.isRecording ? 1 : 0)), id: \.self) { index in
+                            Capsule()
+                                .fill(index == camera.segmentCount && camera.isRecording ? Color.red : Color.white)
+                                .frame(height: 4)
+                        }
+                    }
+                    .accessibilityLabel("\(camera.segmentCount) completed takes")
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -126,7 +141,7 @@ struct ContentView: View {
                     .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 16))
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        if !camera.isRecording && !camera.isStarting && !camera.isSaving {
+                        if !camera.isRecording && !camera.isStarting && !camera.isSaving && !camera.isPaused && !camera.isFinalizingSegment {
                             showEditor = true
                         }
                     }
@@ -137,6 +152,9 @@ struct ContentView: View {
                 }
                 Text(camera.status)
                     .font(.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.65), in: Capsule())
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if camera.isRecording || camera.isStarting {
                     HStack(spacing: 14) {
@@ -145,25 +163,64 @@ struct ContentView: View {
                         Spacer()
                     }
                     .font(.caption2)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.55), in: Capsule())
                 }
-                if !camera.isRecording {
+                if !camera.isRecording && !camera.isPaused {
                     Text("Tap the script to edit or paste")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.8))
                 }
                 Spacer()
-                HStack(spacing: 18) {
-                    Button(camera.isRecording ? "Stop" : camera.isSaving ? "Saving…" : camera.isStarting ? "Starting…" : "Record") {
-                        if camera.isRecording { camera.stop() }
+                HStack(alignment: .center) {
+                    if camera.isPaused {
+                        Button(action: camera.undoLastSegment) {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.title2.weight(.semibold))
+                                .frame(width: 64, height: 64)
+                        }
+                        .accessibilityLabel("Undo last take")
+                    } else {
+                        Color.clear.frame(width: 64, height: 64)
+                    }
+                    Spacer()
+                    Button {
+                        if camera.isRecording { camera.pause() }
+                        else if camera.isPaused { camera.resume() }
                         else { camera.start(script: script) }
+                    } label: {
+                        VStack(spacing: 7) {
+                            ZStack {
+                                Circle().stroke(.white, lineWidth: 4).frame(width: 76, height: 76)
+                                RoundedRectangle(cornerRadius: camera.isRecording ? 5 : 30)
+                                    .fill(.red)
+                                    .frame(width: camera.isRecording ? 30 : 58, height: camera.isRecording ? 30 : 58)
+                            }
+                            Text(camera.isRecording ? "Pause" : camera.isPaused ? "Resume" : "Record")
+                                .font(.caption.weight(.semibold))
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(camera.isRecording ? .red : .blue)
-                    .disabled(camera.isStarting || camera.isSaving)
-                    if let video = camera.lastVideo {
-                        ShareLink(item: video) { Label("Share", systemImage: "square.and.arrow.up") }
-                            .buttonStyle(.bordered)
+                    .accessibilityLabel(camera.isRecording ? "Pause recording" : camera.isPaused ? "Resume recording" : "Record video")
+                    .disabled(camera.isStarting || camera.isSaving || camera.isFinalizingSegment)
+                    Spacer()
+                    if camera.isPaused || camera.isRecording {
+                        Button(action: camera.finish) {
+                            Image(systemName: "checkmark")
+                                .font(.title2.weight(.semibold))
+                                .frame(width: 64, height: 64)
+                        }
+                        .accessibilityLabel("Finish video")
+                        .disabled(camera.isStarting || camera.isFinalizingSegment || camera.isSaving)
+                    } else {
+                        Color.clear.frame(width: 64, height: 64)
                     }
+                }
+                .padding(.bottom, 8)
+                if let video = camera.lastVideo, !camera.isRecording && !camera.isPaused && !camera.isSaving {
+                    ShareLink(item: video) { Label("Share last video", systemImage: "square.and.arrow.up") }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
                 }
             }
             .foregroundStyle(.white)
@@ -173,7 +230,7 @@ struct ContentView: View {
     }
 
     private func closeApp() {
-        guard !camera.isRecording && !camera.isStarting && !camera.isSaving else { return }
+        guard !camera.isRecording && !camera.isStarting && !camera.isSaving && !camera.isPaused && !camera.isFinalizingSegment else { return }
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }) else {

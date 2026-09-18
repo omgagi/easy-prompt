@@ -43,6 +43,9 @@ final class CameraService: NSObject, ObservableObject {
     @Published var cameraReady = false
     @Published var isStarting = false
     @Published var isSaving = false
+    @Published var isPaused = false
+    @Published var isFinalizingSegment = false
+    @Published var segmentCount = 0
     @Published var microphoneActive = false
     @Published var voiceDetected = false
 
@@ -56,6 +59,14 @@ final class CameraService: NSObject, ObservableObject {
     private var recognitionTask: SFSpeechRecognitionTask?
     private var follower = ScriptFollower()
     private var configured = false
+    private struct Segment {
+        let url: URL
+        let startWord: Int
+    }
+    private enum StopIntent { case pause, finish }
+    private var segments: [Segment] = []
+    private var activeSegment: Segment?
+    private var stopIntent: StopIntent?
 
     override init() {
         super.init()
@@ -126,7 +137,7 @@ final class CameraService: NSObject, ObservableObject {
             status = "Camera is not ready. Check camera and microphone access."
             return
         }
-        guard !isStarting && !isRecording && !isSaving else {
+        guard !isStarting && !isRecording && !isSaving && !isFinalizingSegment && !isPaused else {
             status = isSaving ? "Please wait while the video is saved." : "Recording is already starting."
             return
         }
@@ -149,19 +160,41 @@ final class CameraService: NSObject, ObservableObject {
         }
         follower.load(script)
         currentWord = 0
+        segments = []
+        segmentCount = 0
         microphoneActive = false
         voiceDetected = false
         isStarting = true
         status = "Starting recording…"
+        beginSegment()
+    }
+
+    func resume() {
+        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving else { return }
+        guard recognizer?.isAvailable == true else {
+            status = "Speech Recognition is unavailable right now."
+            return
+        }
+        isPaused = false
+        isStarting = true
+        microphoneActive = false
+        voiceDetected = false
+        status = "Resuming recording…"
+        beginSegment()
+    }
+
+    private func beginSegment() {
         let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Recordings", isDirectory: true)
         do { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
         catch {
             isStarting = false
+            isPaused = !segments.isEmpty
             status = "Could not create the recordings folder."
             return
         }
         let url = folder.appendingPathComponent(UUID().uuidString + ".mov")
+        activeSegment = Segment(url: url, startWord: currentWord)
         startRecognition()
         let output = movieOutput
         let session = self.session
@@ -171,18 +204,75 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    func stop() {
+    func pause() {
         guard isRecording else { return }
         isRecording = false
-        isSaving = true
+        isFinalizingSegment = true
+        stopIntent = .pause
         let output = movieOutput
         sessionQueue.async { output.stopRecording() }
         speechInput.end()
         recognitionTask?.cancel()
         recognitionTask = nil
+        status = "Pausing…"
+    }
+
+    func finish() {
+        guard !isSaving && !isFinalizingSegment && !isStarting else { return }
+        if isRecording {
+            isRecording = false
+            isFinalizingSegment = true
+            stopIntent = .finish
+            let output = movieOutput
+            sessionQueue.async { output.stopRecording() }
+            speechInput.end()
+            recognitionTask?.cancel()
+            recognitionTask = nil
+            status = "Finishing recording…"
+        } else if isPaused && !segments.isEmpty {
+            Task { await exportSegments() }
+        }
+    }
+
+    func undoLastSegment() {
+        guard isPaused && !isFinalizingSegment && !isSaving, let removed = segments.popLast() else { return }
+        try? FileManager.default.removeItem(at: removed.url)
+        segmentCount = segments.count
+        follower.seek(to: removed.startWord)
+        currentWord = removed.startWord
+        if segments.isEmpty {
+            isPaused = false
+            status = "Ready to record"
+        } else {
+            status = "Last take removed · ready to continue"
+        }
+    }
+
+    private func exportSegments() async {
+        guard !segments.isEmpty else { return }
+        isSaving = true
+        isPaused = false
         status = "Saving video…"
-        currentWord = 0
-        follower.seek(to: 0)
+        let finalURL = segments[0].url.deletingLastPathComponent()
+            .appendingPathComponent(UUID().uuidString + ".mov")
+        do {
+            try await SegmentComposer.merge(segments.map(\.url), into: finalURL)
+            for segment in segments { try? FileManager.default.removeItem(at: segment.url) }
+            segments = []
+            segmentCount = 0
+            currentWord = 0
+            follower.seek(to: 0)
+            lastVideo = finalURL
+            UserDefaults.standard.set(finalURL.path, forKey: "lastVideoPath")
+            status = "Video saved in app · adding to Photos…"
+            await saveToPhotos(finalURL)
+            isSaving = false
+        } catch {
+            try? FileManager.default.removeItem(at: finalURL)
+            isSaving = false
+            isPaused = true
+            status = "Could not save video: \(error.localizedDescription)"
+        }
     }
 
     func shutdown() {
@@ -305,13 +395,25 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
         Task { @MainActor in
             self.isRecording = false
             self.isStarting = false
-            self.isSaving = false
-            if let error { self.status = "Recording error: \(error.localizedDescription)" }
+            self.isFinalizingSegment = false
+            let intent = self.stopIntent
+            self.stopIntent = nil
+            if let error {
+                if let active = self.activeSegment { try? FileManager.default.removeItem(at: active.url) }
+                self.activeSegment = nil
+                self.isPaused = !self.segments.isEmpty
+                self.status = "Recording error: \(error.localizedDescription)"
+                return
+            }
+            if let segment = self.activeSegment {
+                self.segments.append(segment)
+                self.segmentCount = self.segments.count
+            }
+            self.activeSegment = nil
+            if intent == .finish { await self.exportSegments() }
             else {
-                self.lastVideo = outputFileURL
-                UserDefaults.standard.set(outputFileURL.path, forKey: "lastVideoPath")
-                self.status = "Video saved in app · adding to Photos…"
-                Task { await self.saveToPhotos(outputFileURL) }
+                self.isPaused = !self.segments.isEmpty
+                self.status = "Paused · tap Record to continue"
             }
         }
     }
