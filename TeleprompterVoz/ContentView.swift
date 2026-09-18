@@ -141,57 +141,58 @@ struct ContentView: View {
                     }
                 }
                 Spacer()
-                HStack(alignment: .center) {
-                    if camera.isPaused {
-                        HStack(spacing: 0) {
+                ZStack(alignment: .trailing) {
+                    HStack(spacing: 12) {
+                        if camera.isPaused {
                             Button(action: camera.undoLastSegment) {
                                 Image(systemName: "arrow.uturn.backward")
                                     .font(.title2.weight(.semibold))
-                                    .frame(width: 46, height: 64)
+                                    .frame(width: 44, height: 64)
                             }
                             .accessibilityLabel("Undo last take")
                             .disabled(camera.segmentCount == 0)
+                        } else {
+                            Color.clear.frame(width: 44, height: 64)
+                        }
+                        Button {
+                            if camera.isRecording { camera.pause() }
+                            else if camera.isPaused { camera.resume() }
+                            else { camera.start(script: script) }
+                        } label: {
+                            VStack(spacing: 7) {
+                                ZStack {
+                                    Circle().stroke(.white, lineWidth: 4).frame(width: 76, height: 76)
+                                    RoundedRectangle(cornerRadius: camera.isRecording ? 5 : 30)
+                                        .fill(.red)
+                                        .frame(width: camera.isRecording ? 30 : 58, height: camera.isRecording ? 30 : 58)
+                                }
+                                Text(camera.isRecording ? "Pause" : camera.isPaused ? "Resume" : "Record")
+                                    .font(.caption.weight(.semibold))
+                            }
+                        }
+                        .accessibilityLabel(camera.isRecording ? "Pause recording" : camera.isPaused ? "Resume recording" : "Record video")
+                        .disabled(camera.isStarting || camera.isSaving || camera.isFinalizingSegment)
+                        if camera.isPaused {
                             Button(action: camera.redoLastSegment) {
                                 Image(systemName: "arrow.uturn.forward")
                                     .font(.title2.weight(.semibold))
-                                    .frame(width: 46, height: 64)
+                                    .frame(width: 44, height: 64)
                             }
                             .accessibilityLabel("Redo last take")
                             .disabled(!camera.canRedo)
-                        }
-                    } else {
-                        Color.clear.frame(width: 92, height: 64)
-                    }
-                    Spacer()
-                    Button {
-                        if camera.isRecording { camera.pause() }
-                        else if camera.isPaused { camera.resume() }
-                        else { camera.start(script: script) }
-                    } label: {
-                        VStack(spacing: 7) {
-                            ZStack {
-                                Circle().stroke(.white, lineWidth: 4).frame(width: 76, height: 76)
-                                RoundedRectangle(cornerRadius: camera.isRecording ? 5 : 30)
-                                    .fill(.red)
-                                    .frame(width: camera.isRecording ? 30 : 58, height: camera.isRecording ? 30 : 58)
-                            }
-                            Text(camera.isRecording ? "Pause" : camera.isPaused ? "Resume" : "Record")
-                                .font(.caption.weight(.semibold))
+                        } else {
+                            Color.clear.frame(width: 44, height: 64)
                         }
                     }
-                    .accessibilityLabel(camera.isRecording ? "Pause recording" : camera.isPaused ? "Resume recording" : "Record video")
-                    .disabled(camera.isStarting || camera.isSaving || camera.isFinalizingSegment)
-                    Spacer()
+                    .frame(maxWidth: .infinity)
                     if camera.isPaused || camera.isRecording {
                         Button(action: camera.finish) {
                             Image(systemName: "checkmark")
                                 .font(.title2.weight(.semibold))
-                                .frame(width: 64, height: 64)
+                                .frame(width: 44, height: 64)
                         }
                         .accessibilityLabel("Finish video")
                         .disabled(camera.isStarting || camera.isFinalizingSegment || camera.isSaving || camera.segmentCount == 0 && !camera.isRecording)
-                    } else {
-                        Color.clear.frame(width: 92, height: 64)
                     }
                 }
                 .padding(.bottom, 8)
