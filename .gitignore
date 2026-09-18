@@ -1,0 +1,21 @@
+.DS_Store
+*.xcuserstate
+xcuserdata/
+DerivedData/
+.build/
+
+# App Store submission materials include private review contact details.
+Publishing/
+
+# Signing keys, exported builds, and user recordings.
+*.p8
+*.p12
+*.mobileprovision
+*.ipa
+*.xcarchive/
+*.mov
+Recordings/
+
+# Python cache from optional publishing scripts.
+__pycache__/
+*.pyc
