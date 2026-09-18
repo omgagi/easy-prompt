@@ -142,7 +142,8 @@ struct ContentView: View {
                 }
                 Spacer()
                 ZStack(alignment: .trailing) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
                         if camera.isPaused {
                             Button(action: camera.undoLastSegment) {
                                 Image(systemName: "arrow.uturn.backward")
@@ -154,6 +155,7 @@ struct ContentView: View {
                         } else {
                             Color.clear.frame(width: 44, height: 64)
                         }
+                        Spacer(minLength: 0)
                         Button {
                             if camera.isRecording { camera.pause() }
                             else if camera.isPaused { camera.resume() }
@@ -172,6 +174,7 @@ struct ContentView: View {
                         }
                         .accessibilityLabel(camera.isRecording ? "Pause recording" : camera.isPaused ? "Resume recording" : "Record video")
                         .disabled(camera.isStarting || camera.isSaving || camera.isFinalizingSegment)
+                        Spacer(minLength: 0)
                         if camera.isPaused {
                             Button(action: camera.redoLastSegment) {
                                 Image(systemName: "arrow.uturn.forward")
@@ -183,6 +186,7 @@ struct ContentView: View {
                         } else {
                             Color.clear.frame(width: 44, height: 64)
                         }
+                        Spacer(minLength: 0)
                     }
                     .frame(maxWidth: .infinity)
                     if camera.isPaused || camera.isRecording {
