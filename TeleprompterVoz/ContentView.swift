@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -10,6 +11,7 @@ struct ContentView: View {
     @State private var scriptWords: [String] = []
     @State private var fontSize = 27.0
     @State private var showEditor = false
+    @State private var showPreview = false
     @State private var displayedLine = -1
     @FocusState private var textFocused: Bool
 
@@ -52,6 +54,9 @@ struct ContentView: View {
                         camera.isStarting = true
                         camera.countdownRemaining = 5
                         camera.status = "Recording starts after countdown"
+                    } else if screenshotMode == "preview" {
+                        let video = URL(fileURLWithPath: NSHomeDirectory() + "/Documents/preview-sample.mov")
+                        if FileManager.default.fileExists(atPath: video.path) { camera.previewVideo = video }
                     }
                     if screenshotMode == "editor" { showEditor = true }
                     return
@@ -68,10 +73,18 @@ struct ContentView: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase != .active { camera.cancelCountdown() }
             }
+            .onChange(of: camera.previewVideo) { _, video in
+                showPreview = video != nil
+            }
             .sheet(isPresented: $showEditor, onDismiss: {
                 textFocused = false
             }) {
                 editorSheet
+            }
+            .fullScreenCover(isPresented: $showPreview, onDismiss: camera.closePreview) {
+                if let url = camera.previewVideo {
+                    PreviewPlayerView(url: url) { showPreview = false }
+                }
             }
     }
 
@@ -159,6 +172,17 @@ struct ContentView: View {
                 }
                 Spacer()
                 HStack {
+                    if camera.segmentCount > 0 || camera.isRecording || (!camera.isPaused && camera.lastVideo != nil) {
+                        Button(action: camera.preview) {
+                            Label("Preview", systemImage: "play.fill")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(.black.opacity(0.6), in: Capsule())
+                        }
+                        .accessibilityLabel("Play video preview")
+                        .disabled(camera.isStarting || camera.isFinalizingSegment || camera.isSaving || camera.isPreparingPreview)
+                    }
                     Spacer()
                     Menu {
                         Button { recordDelay = 0 } label: {
@@ -178,7 +202,7 @@ struct ContentView: View {
                             .background(.black.opacity(0.6), in: Capsule())
                     }
                     .accessibilityLabel(recordDelay == 0 ? "Set recording countdown" : "Recording countdown \(recordDelay) seconds")
-                    .disabled(camera.isRecording || camera.isStarting || camera.isSaving || camera.isFinalizingSegment)
+                    .disabled(camera.isRecording || camera.isStarting || camera.isSaving || camera.isFinalizingSegment || camera.isPreparingPreview)
                     .opacity(camera.isRecording ? 0 : 1)
                 }
                 .frame(height: 36)
@@ -192,7 +216,7 @@ struct ContentView: View {
                                     .frame(width: 44, height: 64)
                             }
                             .accessibilityLabel("Undo last take")
-                            .disabled(camera.segmentCount == 0 || camera.isStarting)
+                            .disabled(camera.segmentCount == 0 || camera.isStarting || camera.isPreparingPreview)
                         } else {
                             Color.clear.frame(width: 44, height: 64)
                         }
@@ -219,7 +243,7 @@ struct ContentView: View {
                             }
                         }
                         .accessibilityLabel(camera.countdownRemaining != nil ? "Cancel countdown" : camera.isRecording ? "Pause recording" : camera.isPaused ? "Resume recording" : "Record video")
-                        .disabled((camera.isStarting && camera.countdownRemaining == nil) || camera.isSaving || camera.isFinalizingSegment)
+                        .disabled((camera.isStarting && camera.countdownRemaining == nil) || camera.isSaving || camera.isFinalizingSegment || camera.isPreparingPreview)
                         Spacer(minLength: 0)
                         if camera.isPaused {
                             Button(action: camera.redoLastSegment) {
@@ -229,7 +253,7 @@ struct ContentView: View {
                             }
                             .accessibilityLabel("Redo last take")
                             .offset(x: -17)
-                            .disabled(!camera.canRedo || camera.isStarting)
+                            .disabled(!camera.canRedo || camera.isStarting || camera.isPreparingPreview)
                         } else {
                             Color.clear.frame(width: 44, height: 64)
                         }
@@ -243,7 +267,7 @@ struct ContentView: View {
                                 .frame(width: 44, height: 64)
                         }
                         .accessibilityLabel("Finish video")
-                        .disabled(camera.isStarting || camera.isFinalizingSegment || camera.isSaving || camera.segmentCount == 0 && !camera.isRecording)
+                        .disabled(camera.isStarting || camera.isFinalizingSegment || camera.isSaving || camera.isPreparingPreview || camera.segmentCount == 0 && !camera.isRecording)
                     }
                 }
                 .padding(.bottom, 8)
@@ -282,6 +306,89 @@ struct ContentView: View {
         }
     }
 
+}
+
+private struct PreviewPlayerView: View {
+    let url: URL
+    let onClose: () -> Void
+    @State private var player = AVPlayer()
+    @State private var isPlaying = true
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            PlayerSurface(player: player)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture(perform: togglePlayback)
+            if !isPlaying {
+                Button(action: togglePlayback) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 88, height: 88)
+                        .background(.black.opacity(0.55), in: Circle())
+                }
+                .accessibilityLabel("Play preview")
+            }
+            VStack {
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.black.opacity(0.55), in: Circle())
+                    }
+                    .accessibilityLabel("Close preview")
+                    Spacer()
+                }
+                Spacer()
+            }
+            .padding()
+        }
+        .onAppear {
+            player.replaceCurrentItem(with: AVPlayerItem(url: url))
+            player.play()
+            isPlaying = true
+        }
+        .onDisappear {
+            player.pause()
+            player.replaceCurrentItem(with: nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard let item = notification.object as? AVPlayerItem, item === player.currentItem else { return }
+            player.seek(to: .zero)
+            player.play()
+            isPlaying = true
+        }
+    }
+
+    private func togglePlayback() {
+        if isPlaying { player.pause() }
+        else { player.play() }
+        isPlaying.toggle()
+    }
+}
+
+private struct PlayerSurface: UIViewRepresentable {
+    let player: AVPlayer
+
+    func makeUIView(context: Context) -> PlayerSurfaceView {
+        let view = PlayerSurfaceView()
+        view.playerLayer.videoGravity = .resizeAspectFill
+        view.playerLayer.player = player
+        return view
+    }
+
+    func updateUIView(_ view: PlayerSurfaceView, context: Context) {
+        view.playerLayer.player = player
+    }
+}
+
+private final class PlayerSurfaceView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
 private struct RecordingProgressBar: View {

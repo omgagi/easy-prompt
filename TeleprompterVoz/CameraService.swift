@@ -52,6 +52,8 @@ final class CameraService: NSObject, ObservableObject {
     @Published var microphoneActive = false
     @Published var voiceDetected = false
     @Published var countdownRemaining: Int?
+    @Published var previewVideo: URL?
+    @Published var isPreparingPreview = false
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "teleprompter.capture")
@@ -69,7 +71,7 @@ final class CameraService: NSObject, ObservableObject {
         var duration: TimeInterval = 0
         var endWord: Int = 0
     }
-    private enum StopIntent { case pause, finish }
+    private enum StopIntent { case pause, finish, preview }
     private var segments: [Segment] = []
     private var undoneSegments: [Segment] = []
     private var activeSegment: Segment?
@@ -77,6 +79,7 @@ final class CameraService: NSObject, ObservableObject {
     private var activeStartedAt: TimeInterval?
     private var progressTimer: Timer?
     private var countdownTask: Task<Void, Never>?
+    private var temporaryPreviewURL: URL?
 
     override init() {
         super.init()
@@ -154,7 +157,7 @@ final class CameraService: NSObject, ObservableObject {
             status = "Camera is not ready. Check camera and microphone access."
             return
         }
-        guard !isStarting && !isRecording && !isSaving && !isFinalizingSegment && !isPaused else {
+        guard !isStarting && !isRecording && !isSaving && !isPreparingPreview && !isFinalizingSegment && !isPaused else {
             status = isSaving ? "Please wait while the video is saved." : "Recording is already starting."
             return
         }
@@ -191,7 +194,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func resume(delay: Int = 0) {
-        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving else { return }
+        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving && !isPreparingPreview else { return }
         guard recognizer?.isAvailable == true else {
             status = "Speech Recognition is unavailable right now."
             return
@@ -277,7 +280,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func finish() {
-        guard !isSaving && !isFinalizingSegment && !isStarting else { return }
+        guard !isSaving && !isPreparingPreview && !isFinalizingSegment && !isStarting else { return }
         if isRecording {
             stopProgressClock()
             isRecording = false
@@ -294,8 +297,51 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
+    func preview() {
+        guard !isStarting && !isFinalizingSegment && !isSaving && !isPreparingPreview else { return }
+        if isRecording {
+            pause()
+            stopIntent = .preview
+            status = "Preparing preview…"
+        } else if isPaused && !segments.isEmpty {
+            Task { await preparePreview() }
+        } else if !isPaused, let lastVideo {
+            previewVideo = lastVideo
+        }
+    }
+
+    private func preparePreview() async {
+        guard !segments.isEmpty else { return }
+        isPreparingPreview = true
+        status = "Preparing preview…"
+        if segments.count == 1 {
+            previewVideo = segments[0].url
+            isPreparingPreview = false
+            status = "Paused · tap Resume to continue"
+            return
+        }
+        let url = segments[0].url.deletingLastPathComponent()
+            .appendingPathComponent("preview-\(UUID().uuidString).mov")
+        do {
+            try await SegmentComposer.merge(segments.map(\.url), into: url)
+            temporaryPreviewURL = url
+            previewVideo = url
+            status = "Paused · tap Resume to continue"
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            status = "Could not preview video: \(error.localizedDescription)"
+        }
+        isPreparingPreview = false
+    }
+
+    func closePreview() {
+        previewVideo = nil
+        if let temporaryPreviewURL { try? FileManager.default.removeItem(at: temporaryPreviewURL) }
+        temporaryPreviewURL = nil
+    }
+
     func undoLastSegment() {
-        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving,
+        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving && !isPreparingPreview,
               let removed = segments.popLast() else { return }
         undoneSegments.append(removed)
         canRedo = true
@@ -308,7 +354,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func redoLastSegment() {
-        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving,
+        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving && !isPreparingPreview,
               let restored = undoneSegments.popLast() else { return }
         segments.append(restored)
         canRedo = !undoneSegments.isEmpty
@@ -353,6 +399,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func shutdown() {
+        closePreview()
         cancelCountdown()
         stopProgressClock()
         speechInput.end()
@@ -533,7 +580,8 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
             if intent == .finish { await self.exportSegments() }
             else {
                 self.isPaused = !self.segments.isEmpty
-                self.status = "Paused · tap Resume to continue"
+                if intent == .preview { await self.preparePreview() }
+                else { self.status = "Paused · tap Resume to continue" }
             }
         }
     }
