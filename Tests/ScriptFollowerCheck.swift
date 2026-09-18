@@ -21,6 +21,12 @@ struct ScriptFollowerCheck {
         precondition(follower.follow("Hello everyone") == 2, "English speech must advance")
         precondition(follower.follow("Hello everyone today we are recording") == 6)
         precondition(follower.follow("Hello everyone today we are recording") == 6, "Partial results must not repeat words")
-        print("ScriptFollower: 12 checks passed")
+        let longScript = (1...120).map { "word\($0)" }
+        follower.load(longScript.joined(separator: " "))
+        for end in stride(from: 4, through: 120, by: 4) {
+            let recent = longScript[max(0, end - 20)..<end].joined(separator: " ")
+            precondition(follower.follow(recent) == end, "The prompt fell behind continuous speech")
+        }
+        print("ScriptFollower: short and continuous speech checks passed")
     }
 }

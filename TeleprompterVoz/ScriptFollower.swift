@@ -24,7 +24,12 @@ struct ScriptFollower {
 
         for end in (lower + 1)...upper {
             for length in 1...min(5, spoken.count, end - lower) {
-                guard Array(words[(end - length)..<end]) == Array(spoken.suffix(length)) else { continue }
+                var matches = true
+                for offset in 0..<length where words[end - length + offset] != spoken[spoken.count - length + offset] {
+                    matches = false
+                    break
+                }
+                guard matches else { continue }
                 let score = length * 10 - abs(end - position) / 3
                 if score > bestScore && end > position {
                     bestScore = score

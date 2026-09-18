@@ -46,6 +46,8 @@ final class CameraService: NSObject, ObservableObject {
     @Published var isPaused = false
     @Published var isFinalizingSegment = false
     @Published var segmentCount = 0
+    @Published var segmentDurations: [TimeInterval] = []
+    @Published var canRedo = false
     @Published var recordedDuration: TimeInterval = 0
     @Published var microphoneActive = false
     @Published var voiceDetected = false
@@ -64,9 +66,11 @@ final class CameraService: NSObject, ObservableObject {
         let url: URL
         let startWord: Int
         var duration: TimeInterval = 0
+        var endWord: Int = 0
     }
     private enum StopIntent { case pause, finish }
     private var segments: [Segment] = []
+    private var undoneSegments: [Segment] = []
     private var activeSegment: Segment?
     private var stopIntent: StopIntent?
     private var activeStartedAt: TimeInterval?
@@ -118,9 +122,16 @@ final class CameraService: NSObject, ObservableObject {
                 session.addOutput(movieOutput)
                 session.addOutput(audioOutput)
                 if let self { audioOutput.setSampleBufferDelegate(self, queue: audioQueue) }
-                if let connection = movieOutput.connection(with: .video), connection.isVideoMirroringSupported {
-                    connection.automaticallyAdjustsVideoMirroring = false
-                    connection.isVideoMirrored = true
+                if let connection = movieOutput.connection(with: .video) {
+                    if connection.isVideoMirroringSupported {
+                        connection.automaticallyAdjustsVideoMirroring = false
+                        connection.isVideoMirrored = true
+                    }
+                    let coordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
+                    let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+                    if connection.isVideoRotationAngleSupported(angle) {
+                        connection.videoRotationAngle = angle
+                    }
                 }
                 session.commitConfiguration()
                 session.startRunning()
@@ -165,7 +176,11 @@ final class CameraService: NSObject, ObservableObject {
         follower.load(script)
         currentWord = 0
         segments = []
+        for segment in undoneSegments { try? FileManager.default.removeItem(at: segment.url) }
+        undoneSegments = []
+        canRedo = false
         segmentCount = 0
+        segmentDurations = []
         recordedDuration = 0
         microphoneActive = false
         voiceDetected = false
@@ -205,6 +220,14 @@ final class CameraService: NSObject, ObservableObject {
         let session = self.session
         sessionQueue.async { [weak self] in
             if !session.isRunning { session.startRunning() }
+            if let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
+               let connection = output.connection(with: .video) {
+                let coordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: nil)
+                let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+                if connection.isVideoRotationAngleSupported(angle) {
+                    connection.videoRotationAngle = angle
+                }
+            }
             if let self { output.startRecording(to: url, recordingDelegate: self) }
         }
     }
@@ -243,17 +266,27 @@ final class CameraService: NSObject, ObservableObject {
 
     func undoLastSegment() {
         guard isPaused && !isFinalizingSegment && !isSaving, let removed = segments.popLast() else { return }
-        try? FileManager.default.removeItem(at: removed.url)
+        undoneSegments.append(removed)
+        canRedo = true
         segmentCount = segments.count
+        segmentDurations = segments.map(\.duration)
         recordedDuration = segments.reduce(0) { $0 + $1.duration }
         follower.seek(to: removed.startWord)
         currentWord = removed.startWord
-        if segments.isEmpty {
-            isPaused = false
-            status = "Ready to record"
-        } else {
-            status = "Last take removed · ready to continue"
-        }
+        status = "Last take removed · tap Redo to restore"
+    }
+
+    func redoLastSegment() {
+        guard isPaused && !isFinalizingSegment && !isSaving,
+              let restored = undoneSegments.popLast() else { return }
+        segments.append(restored)
+        canRedo = !undoneSegments.isEmpty
+        segmentCount = segments.count
+        segmentDurations = segments.map(\.duration)
+        recordedDuration = segments.reduce(0) { $0 + $1.duration }
+        follower.seek(to: restored.endWord)
+        currentWord = restored.endWord
+        status = "Take restored · ready to continue"
     }
 
     private func exportSegments() async {
@@ -266,8 +299,12 @@ final class CameraService: NSObject, ObservableObject {
         do {
             try await SegmentComposer.merge(segments.map(\.url), into: finalURL)
             for segment in segments { try? FileManager.default.removeItem(at: segment.url) }
+            for segment in undoneSegments { try? FileManager.default.removeItem(at: segment.url) }
             segments = []
+            undoneSegments = []
+            canRedo = false
             segmentCount = 0
+            segmentDurations = []
             recordedDuration = 0
             currentWord = 0
             follower.seek(to: 0)
@@ -302,7 +339,7 @@ final class CameraService: NSObject, ObservableObject {
         recognitionTask?.cancel()
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = false
+        request.requiresOnDeviceRecognition = recognizer?.supportsOnDeviceRecognition == true
         speechInput.start(request)
         recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
@@ -310,7 +347,9 @@ final class CameraService: NSObject, ObservableObject {
                 Task { @MainActor in
                     if self.isStarting || self.isRecording {
                         if !result.bestTranscription.formattedString.isEmpty { self.voiceDetected = true }
-                        self.currentWord = self.follower.follow(result.bestTranscription.formattedString)
+                        let recentSpeech = result.bestTranscription.segments.suffix(20)
+                            .map(\.substring).joined(separator: " ")
+                        self.currentWord = self.follower.follow(recentSpeech)
                     }
                 }
             }
@@ -325,9 +364,15 @@ final class CameraService: NSObject, ObservableObject {
     private func startProgressClock() {
         progressTimer?.invalidate()
         activeStartedAt = ProcessInfo.processInfo.systemUptime
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateProgressClock() }
         }
+    }
+
+    private func discardUndoneSegments() {
+        for segment in undoneSegments { try? FileManager.default.removeItem(at: segment.url) }
+        undoneSegments = []
+        canRedo = false
     }
 
     private func updateProgressClock() {
@@ -423,6 +468,7 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
         Task { @MainActor in
             self.isStarting = false
             self.isRecording = true
+            self.discardUndoneSegments()
             self.startProgressClock()
             self.status = "Recording"
         }
@@ -445,8 +491,11 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
                 return
             }
             if let segment = self.activeSegment {
-                self.segments.append(segment)
+                var finished = segment
+                finished.endWord = self.currentWord
+                self.segments.append(finished)
                 self.segmentCount = self.segments.count
+                self.segmentDurations = self.segments.map(\.duration)
             }
             self.activeSegment = nil
             if intent == .finish { await self.exportSegments() }

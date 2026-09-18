@@ -5,11 +5,13 @@ import UIKit
 struct ContentView: View {
     @StateObject private var camera = CameraService()
     @AppStorage("savedScript") private var script = SampleScript.longSpanish
+    @State private var scriptWords: [String] = []
     @State private var fontSize = 27.0
     @State private var showEditor = false
+    @State private var displayedLine = -1
     @FocusState private var textFocused: Bool
 
-    private var words: [String] { ScriptFollower.displayWords(in: script) }
+    private var words: [String] { scriptWords }
     #if DEBUG
     private var screenshotMode: String? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -25,6 +27,7 @@ struct ContentView: View {
                 #if DEBUG
                 if let screenshotMode {
                     script = SampleScript.longEnglish
+                    scriptWords = ScriptFollower.displayWords(in: script)
                     camera.cameraReady = true
                     camera.speechAvailable = true
                     camera.status = screenshotMode == "recording" ? "Recording" : "Ready to record"
@@ -38,6 +41,8 @@ struct ContentView: View {
                         camera.currentWord = 12
                         camera.isPaused = true
                         camera.segmentCount = 2
+                        camera.segmentDurations = [72, 93]
+                        camera.canRedo = true
                         camera.recordedDuration = 165
                         camera.status = "Paused · tap Resume to continue"
                     }
@@ -46,7 +51,12 @@ struct ContentView: View {
                 }
                 #endif
                 if script == SampleScript.previousShortSpanish { script = SampleScript.longSpanish }
+                scriptWords = ScriptFollower.displayWords(in: script)
                 await camera.prepare()
+            }
+            .onChange(of: script) { _, updated in
+                scriptWords = ScriptFollower.displayWords(in: updated)
+                displayedLine = -1
             }
             .sheet(isPresented: $showEditor, onDismiss: {
                 textFocused = false
@@ -105,7 +115,9 @@ struct ContentView: View {
             #endif
             VStack(spacing: 6) {
                 if camera.recordedDuration > 0 || camera.isRecording {
-                    RecordingProgressBar(duration: camera.recordedDuration)
+                    RecordingProgressBar(duration: camera.recordedDuration,
+                                         segmentDurations: camera.segmentDurations,
+                                         isRecording: camera.isRecording)
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -123,20 +135,32 @@ struct ContentView: View {
                     }
                     .onChange(of: camera.currentWord) { _, newValue in
                         let line = min(newValue, max(words.count - 1, 0)) / 3
-                        withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(line, anchor: .top) }
+                        guard line != displayedLine else { return }
+                        displayedLine = line
+                        proxy.scrollTo(line, anchor: .top)
                     }
                 }
                 Spacer()
                 HStack(alignment: .center) {
                     if camera.isPaused {
-                        Button(action: camera.undoLastSegment) {
-                            Image(systemName: "arrow.uturn.backward")
-                                .font(.title2.weight(.semibold))
-                                .frame(width: 64, height: 64)
+                        HStack(spacing: 0) {
+                            Button(action: camera.undoLastSegment) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.title2.weight(.semibold))
+                                    .frame(width: 46, height: 64)
+                            }
+                            .accessibilityLabel("Undo last take")
+                            .disabled(camera.segmentCount == 0)
+                            Button(action: camera.redoLastSegment) {
+                                Image(systemName: "arrow.uturn.forward")
+                                    .font(.title2.weight(.semibold))
+                                    .frame(width: 46, height: 64)
+                            }
+                            .accessibilityLabel("Redo last take")
+                            .disabled(!camera.canRedo)
                         }
-                        .accessibilityLabel("Undo last take")
                     } else {
-                        Color.clear.frame(width: 64, height: 64)
+                        Color.clear.frame(width: 92, height: 64)
                     }
                     Spacer()
                     Button {
@@ -165,9 +189,9 @@ struct ContentView: View {
                                 .frame(width: 64, height: 64)
                         }
                         .accessibilityLabel("Finish video")
-                        .disabled(camera.isStarting || camera.isFinalizingSegment || camera.isSaving)
+                        .disabled(camera.isStarting || camera.isFinalizingSegment || camera.isSaving || camera.segmentCount == 0 && !camera.isRecording)
                     } else {
-                        Color.clear.frame(width: 64, height: 64)
+                        Color.clear.frame(width: 92, height: 64)
                     }
                 }
                 .padding(.bottom, 8)
@@ -210,26 +234,46 @@ struct ContentView: View {
 
 private struct RecordingProgressBar: View {
     let duration: TimeInterval
+    let segmentDurations: [TimeInterval]
+    let isRecording: Bool
     private let interval: TimeInterval = 150
 
     private var blockCount: Int { max(1, Int(ceil(duration / interval))) }
+    private var boundaries: [TimeInterval] {
+        let completedCount = isRecording ? segmentDurations.count : max(0, segmentDurations.count - 1)
+        var elapsed = 0.0
+        return segmentDurations.prefix(completedCount).map { segment in
+            elapsed += segment
+            return elapsed
+        }
+    }
 
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(0..<blockCount, id: \.self) { block in
-                GeometryReader { geometry in
-                    Capsule()
-                        .fill(.black.opacity(0.5))
-                        .overlay(alignment: .leading) {
-                            Capsule()
-                                .fill(.red)
-                                .frame(width: geometry.size.width * min(1, max(0, (duration - Double(block) * interval) / interval)))
-                        }
-                        .clipShape(Capsule())
+        GeometryReader { timeline in
+            HStack(spacing: 3) {
+                ForEach(0..<blockCount, id: \.self) { block in
+                    GeometryReader { geometry in
+                        Capsule()
+                            .fill(.black.opacity(0.5))
+                            .overlay(alignment: .leading) {
+                                Capsule()
+                                    .fill(.red)
+                                    .frame(width: geometry.size.width * min(1, max(0, (duration - Double(block) * interval) / interval)))
+                            }
+                            .clipShape(Capsule())
+                    }
+                    .frame(height: 5)
                 }
-                .frame(height: 5)
+            }
+            .frame(height: 5)
+            ForEach(Array(boundaries.enumerated()), id: \.offset) { _, boundary in
+                Rectangle()
+                    .fill(.white)
+                    .frame(width: 2, height: 10)
+                    .position(x: timeline.size.width * boundary / (Double(blockCount) * interval), y: 2.5)
             }
         }
+        .frame(height: 10)
         .accessibilityLabel("Recording progress")
     }
 }
