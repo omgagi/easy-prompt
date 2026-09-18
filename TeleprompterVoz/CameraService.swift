@@ -51,6 +51,7 @@ final class CameraService: NSObject, ObservableObject {
     @Published var recordedDuration: TimeInterval = 0
     @Published var microphoneActive = false
     @Published var voiceDetected = false
+    @Published var countdownRemaining: Int?
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "teleprompter.capture")
@@ -75,6 +76,7 @@ final class CameraService: NSObject, ObservableObject {
     private var stopIntent: StopIntent?
     private var activeStartedAt: TimeInterval?
     private var progressTimer: Timer?
+    private var countdownTask: Task<Void, Never>?
 
     override init() {
         super.init()
@@ -147,7 +149,7 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    func start(script: String) {
+    func start(script: String, delay: Int = 0) {
         guard cameraReady else {
             status = "Camera is not ready. Check camera and microphone access."
             return
@@ -185,22 +187,50 @@ final class CameraService: NSObject, ObservableObject {
         microphoneActive = false
         voiceDetected = false
         isStarting = true
-        status = "Starting recording…"
-        beginSegment()
+        scheduleSegment(after: delay)
     }
 
-    func resume() {
+    func resume(delay: Int = 0) {
         guard isPaused && !isStarting && !isFinalizingSegment && !isSaving else { return }
         guard recognizer?.isAvailable == true else {
             status = "Speech Recognition is unavailable right now."
             return
         }
-        isPaused = false
         isStarting = true
         microphoneActive = false
         voiceDetected = false
-        status = "Resuming recording…"
-        beginSegment()
+        scheduleSegment(after: delay)
+    }
+
+    private func scheduleSegment(after delay: Int) {
+        guard delay > 0 else {
+            isPaused = false
+            status = "Starting recording…"
+            beginSegment()
+            return
+        }
+        status = "Recording starts after countdown"
+        countdownTask = Task { @MainActor in
+            for second in stride(from: delay, through: 1, by: -1) {
+                countdownRemaining = second
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { return }
+            }
+            countdownRemaining = nil
+            countdownTask = nil
+            isPaused = false
+            status = "Starting recording…"
+            beginSegment()
+        }
+    }
+
+    func cancelCountdown() {
+        guard countdownRemaining != nil else { return }
+        countdownTask?.cancel()
+        countdownTask = nil
+        countdownRemaining = nil
+        isStarting = false
+        status = isPaused ? "Paused · tap Resume to continue" : "Ready to record"
     }
 
     private func beginSegment() {
@@ -265,7 +295,8 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func undoLastSegment() {
-        guard isPaused && !isFinalizingSegment && !isSaving, let removed = segments.popLast() else { return }
+        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving,
+              let removed = segments.popLast() else { return }
         undoneSegments.append(removed)
         canRedo = true
         segmentCount = segments.count
@@ -277,7 +308,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func redoLastSegment() {
-        guard isPaused && !isFinalizingSegment && !isSaving,
+        guard isPaused && !isStarting && !isFinalizingSegment && !isSaving,
               let restored = undoneSegments.popLast() else { return }
         segments.append(restored)
         canRedo = !undoneSegments.isEmpty
@@ -322,6 +353,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func shutdown() {
+        cancelCountdown()
         stopProgressClock()
         speechInput.end()
         recognitionTask?.cancel()

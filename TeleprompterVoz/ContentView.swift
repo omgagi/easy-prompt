@@ -3,8 +3,10 @@ import SwiftUI
 import UIKit
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraService()
     @AppStorage("savedScript") private var script = SampleScript.longSpanish
+    @AppStorage("recordDelay") private var recordDelay = 0
     @State private var scriptWords: [String] = []
     @State private var fontSize = 27.0
     @State private var showEditor = false
@@ -45,6 +47,11 @@ struct ContentView: View {
                         camera.canRedo = true
                         camera.recordedDuration = 165
                         camera.status = "Paused · tap Resume to continue"
+                    } else if screenshotMode == "countdown" {
+                        recordDelay = 5
+                        camera.isStarting = true
+                        camera.countdownRemaining = 5
+                        camera.status = "Recording starts after countdown"
                     }
                     if screenshotMode == "editor" { showEditor = true }
                     return
@@ -57,6 +64,9 @@ struct ContentView: View {
             .onChange(of: script) { _, updated in
                 scriptWords = ScriptFollower.displayWords(in: updated)
                 displayedLine = -1
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase != .active { camera.cancelCountdown() }
             }
             .sheet(isPresented: $showEditor, onDismiss: {
                 textFocused = false
@@ -113,6 +123,13 @@ struct ContentView: View {
             #else
             CameraPreview(session: camera.session).ignoresSafeArea()
             #endif
+            if let remaining = camera.countdownRemaining {
+                Text("\(remaining)")
+                    .font(.system(size: 112, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.8), radius: 12)
+                    .accessibilityLabel("Recording in \(remaining)")
+            }
             VStack(spacing: 6) {
                 if camera.recordedDuration > 0 || camera.isRecording {
                     RecordingProgressBar(duration: camera.recordedDuration,
@@ -141,6 +158,30 @@ struct ContentView: View {
                     }
                 }
                 Spacer()
+                HStack {
+                    Spacer()
+                    Menu {
+                        Button { recordDelay = 0 } label: {
+                            Label("Off", systemImage: recordDelay == 0 ? "checkmark" : "timer")
+                        }
+                        Button { recordDelay = 5 } label: {
+                            Label("5 seconds", systemImage: recordDelay == 5 ? "checkmark" : "timer")
+                        }
+                        Button { recordDelay = 10 } label: {
+                            Label("10 seconds", systemImage: recordDelay == 10 ? "checkmark" : "timer")
+                        }
+                    } label: {
+                        Label(recordDelay == 0 ? "Timer" : "\(recordDelay)s", systemImage: "timer")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.6), in: Capsule())
+                    }
+                    .accessibilityLabel(recordDelay == 0 ? "Set recording countdown" : "Recording countdown \(recordDelay) seconds")
+                    .disabled(camera.isRecording || camera.isStarting || camera.isSaving || camera.isFinalizingSegment)
+                    .opacity(camera.isRecording ? 0 : 1)
+                }
+                .frame(height: 36)
                 ZStack(alignment: .trailing) {
                     HStack(spacing: 0) {
                         Spacer(minLength: 0)
@@ -151,15 +192,16 @@ struct ContentView: View {
                                     .frame(width: 44, height: 64)
                             }
                             .accessibilityLabel("Undo last take")
-                            .disabled(camera.segmentCount == 0)
+                            .disabled(camera.segmentCount == 0 || camera.isStarting)
                         } else {
                             Color.clear.frame(width: 44, height: 64)
                         }
                         Spacer(minLength: 0)
                         Button {
-                            if camera.isRecording { camera.pause() }
-                            else if camera.isPaused { camera.resume() }
-                            else { camera.start(script: script) }
+                            if camera.countdownRemaining != nil { camera.cancelCountdown() }
+                            else if camera.isRecording { camera.pause() }
+                            else if camera.isPaused { camera.resume(delay: recordDelay) }
+                            else { camera.start(script: script, delay: recordDelay) }
                         } label: {
                             VStack(spacing: 7) {
                                 ZStack {
@@ -167,13 +209,17 @@ struct ContentView: View {
                                     RoundedRectangle(cornerRadius: camera.isRecording ? 5 : 30)
                                         .fill(.red)
                                         .frame(width: camera.isRecording ? 30 : 58, height: camera.isRecording ? 30 : 58)
+                                    if camera.countdownRemaining != nil {
+                                        Image(systemName: "xmark")
+                                            .font(.title2.weight(.bold))
+                                    }
                                 }
-                                Text(camera.isRecording ? "Pause" : camera.isPaused ? "Resume" : "Record")
+                                Text(camera.countdownRemaining != nil ? "Cancel" : camera.isRecording ? "Pause" : camera.isPaused ? "Resume" : "Record")
                                     .font(.caption.weight(.semibold))
                             }
                         }
-                        .accessibilityLabel(camera.isRecording ? "Pause recording" : camera.isPaused ? "Resume recording" : "Record video")
-                        .disabled(camera.isStarting || camera.isSaving || camera.isFinalizingSegment)
+                        .accessibilityLabel(camera.countdownRemaining != nil ? "Cancel countdown" : camera.isRecording ? "Pause recording" : camera.isPaused ? "Resume recording" : "Record video")
+                        .disabled((camera.isStarting && camera.countdownRemaining == nil) || camera.isSaving || camera.isFinalizingSegment)
                         Spacer(minLength: 0)
                         if camera.isPaused {
                             Button(action: camera.redoLastSegment) {
@@ -183,7 +229,7 @@ struct ContentView: View {
                             }
                             .accessibilityLabel("Redo last take")
                             .offset(x: -17)
-                            .disabled(!camera.canRedo)
+                            .disabled(!camera.canRedo || camera.isStarting)
                         } else {
                             Color.clear.frame(width: 44, height: 64)
                         }
@@ -209,7 +255,7 @@ struct ContentView: View {
                     .padding(.vertical, 6)
                     .background(.black.opacity(0.65), in: Capsule())
                     .frame(maxWidth: .infinity)
-                if camera.isRecording || camera.isStarting {
+                if camera.isRecording || (camera.isStarting && camera.countdownRemaining == nil) {
                     HStack(spacing: 14) {
                         Label(camera.microphoneActive ? "Mic OK" : "Waiting for mic", systemImage: "mic")
                         Label(camera.voiceDetected ? "Voice OK" : "Listening", systemImage: "waveform")
@@ -219,7 +265,7 @@ struct ContentView: View {
                     .padding(.vertical, 5)
                     .background(.black.opacity(0.55), in: Capsule())
                 }
-                if !camera.isRecording && !camera.isPaused {
+                if !camera.isRecording && !camera.isPaused && !camera.isStarting {
                     Text("Tap the script to edit or paste")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.8))
