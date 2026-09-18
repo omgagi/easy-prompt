@@ -7,9 +7,8 @@ Easy Prompt is an iPhone teleprompter with a live front-camera preview. The scri
 1. Open `TeleprompterVoz.xcodeproj` in Xcode and select your iPhone.
 2. Build and run. Allow camera, microphone, and Speech Recognition access.
 3. Tap the script box to open the plain white editor. Tap where you want to type, or press and hold to use the normal iOS **Paste** menu. Tap **Done** to return to the camera.
-4. Tap the red button to record. Tap it again to pause, then tap it to resume. **Mic OK** and **Voice OK** show whether audio and speech recognition are active.
+4. Tap the red button to record. Tap it again to pause, then tap it to resume. The red progress bar fills in 2½-minute sections, with no timer labels. It stops during pauses and goes back when you undo a take. Status, **Mic OK**, and **Voice OK** appear below the record button.
 5. While paused, tap **Undo** to discard the last take and return the script to its starting word. Tap the checkmark to join the remaining takes into one video. The video is saved to Photos when permission is granted; tap **Share** to send it elsewhere.
-6. Tap the top-right close button to dismiss the app scene when idle.
 
 The script is visible only in the camera preview and is not embedded in the video. Recognition detects English or Spanish from the script. Depending on device support and availability, iOS may use Apple's speech recognition service. The installed name is **Easy Prompt**; the bundle identifier is kept so this build updates the previous installation.
 

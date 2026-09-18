@@ -7,7 +7,6 @@ struct ContentView: View {
     @AppStorage("savedScript") private var script = SampleScript.longSpanish
     @State private var fontSize = 27.0
     @State private var showEditor = false
-    @State private var showCloseHelp = false
     @FocusState private var textFocused: Bool
 
     private var words: [String] { ScriptFollower.displayWords(in: script) }
@@ -32,13 +31,15 @@ struct ContentView: View {
                     if screenshotMode == "recording" {
                         camera.currentWord = 12
                         camera.isRecording = true
+                        camera.recordedDuration = 68
                         camera.microphoneActive = true
                         camera.voiceDetected = true
                     } else if screenshotMode == "paused" {
                         camera.currentWord = 12
                         camera.isPaused = true
                         camera.segmentCount = 2
-                        camera.status = "Paused · tap Record to continue"
+                        camera.recordedDuration = 165
+                        camera.status = "Paused · tap Resume to continue"
                     }
                     if screenshotMode == "editor" { showEditor = true }
                     return
@@ -51,11 +52,6 @@ struct ContentView: View {
                 textFocused = false
             }) {
                 editorSheet
-            }
-            .alert("Leave Easy Prompt", isPresented: $showCloseHelp) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("Swipe up from the bottom of the screen to return to Home. iOS did not close this window.")
             }
     }
 
@@ -108,28 +104,8 @@ struct ContentView: View {
             CameraPreview(session: camera.session).ignoresSafeArea()
             #endif
             VStack(spacing: 6) {
-                HStack {
-                    Text("Easy Prompt")
-                        .font(.headline)
-                    Spacer()
-                    Button(action: closeApp) {
-                        Image(systemName: "xmark")
-                            .font(.headline)
-                            .padding(9)
-                            .background(.black.opacity(0.55), in: Circle())
-                    }
-                    .accessibilityLabel("Close Easy Prompt")
-                    .disabled(camera.isRecording || camera.isStarting || camera.isSaving || camera.isPaused || camera.isFinalizingSegment)
-                }
-                if camera.segmentCount > 0 || camera.isRecording {
-                    HStack(spacing: 3) {
-                        ForEach(0..<(camera.segmentCount + (camera.isRecording ? 1 : 0)), id: \.self) { index in
-                            Capsule()
-                                .fill(index == camera.segmentCount && camera.isRecording ? Color.red : Color.white)
-                                .frame(height: 4)
-                        }
-                    }
-                    .accessibilityLabel("\(camera.segmentCount) completed takes")
+                if camera.recordedDuration > 0 || camera.isRecording {
+                    RecordingProgressBar(duration: camera.recordedDuration)
                 }
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -149,28 +125,6 @@ struct ContentView: View {
                         let line = min(newValue, max(words.count - 1, 0)) / 3
                         withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(line, anchor: .top) }
                     }
-                }
-                Text(camera.status)
-                    .font(.caption)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.black.opacity(0.65), in: Capsule())
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if camera.isRecording || camera.isStarting {
-                    HStack(spacing: 14) {
-                        Label(camera.microphoneActive ? "Mic OK" : "Waiting for mic", systemImage: "mic")
-                        Label(camera.voiceDetected ? "Voice OK" : "Listening", systemImage: "waveform")
-                        Spacer()
-                    }
-                    .font(.caption2)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(.black.opacity(0.55), in: Capsule())
-                }
-                if !camera.isRecording && !camera.isPaused {
-                    Text("Tap the script to edit or paste")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.8))
                 }
                 Spacer()
                 HStack(alignment: .center) {
@@ -217,6 +171,29 @@ struct ContentView: View {
                     }
                 }
                 .padding(.bottom, 8)
+                Text(camera.status)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.65), in: Capsule())
+                    .frame(maxWidth: .infinity)
+                if camera.isRecording || camera.isStarting {
+                    HStack(spacing: 14) {
+                        Label(camera.microphoneActive ? "Mic OK" : "Waiting for mic", systemImage: "mic")
+                        Label(camera.voiceDetected ? "Voice OK" : "Listening", systemImage: "waveform")
+                    }
+                    .font(.caption2)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.55), in: Capsule())
+                }
+                if !camera.isRecording && !camera.isPaused {
+                    Text("Tap the script to edit or paste")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
                 if let video = camera.lastVideo, !camera.isRecording && !camera.isPaused && !camera.isSaving {
                     ShareLink(item: video) { Label("Share last video", systemImage: "square.and.arrow.up") }
                         .font(.caption)
@@ -229,22 +206,31 @@ struct ContentView: View {
         }
     }
 
-    private func closeApp() {
-        guard !camera.isRecording && !camera.isStarting && !camera.isSaving && !camera.isPaused && !camera.isFinalizingSegment else { return }
-        guard let scene = UIApplication.shared.connectedScenes
-            .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }) else {
-            showCloseHelp = true
-            return
+}
+
+private struct RecordingProgressBar: View {
+    let duration: TimeInterval
+    private let interval: TimeInterval = 150
+
+    private var blockCount: Int { max(1, Int(ceil(duration / interval))) }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<blockCount, id: \.self) { block in
+                GeometryReader { geometry in
+                    Capsule()
+                        .fill(.black.opacity(0.5))
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(.red)
+                                .frame(width: geometry.size.width * min(1, max(0, (duration - Double(block) * interval) / interval)))
+                        }
+                        .clipShape(Capsule())
+                }
+                .frame(height: 5)
+            }
         }
-        let options = UIWindowSceneDestructionRequestOptions()
-        UIApplication.shared.requestSceneSessionDestruction(scene.session, options: options) { _ in
-            Task { @MainActor in showCloseHelp = true }
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            if scene.activationState == .foregroundActive { showCloseHelp = true }
-        }
+        .accessibilityLabel("Recording progress")
     }
 }
 

@@ -46,6 +46,7 @@ final class CameraService: NSObject, ObservableObject {
     @Published var isPaused = false
     @Published var isFinalizingSegment = false
     @Published var segmentCount = 0
+    @Published var recordedDuration: TimeInterval = 0
     @Published var microphoneActive = false
     @Published var voiceDetected = false
 
@@ -62,11 +63,14 @@ final class CameraService: NSObject, ObservableObject {
     private struct Segment {
         let url: URL
         let startWord: Int
+        var duration: TimeInterval = 0
     }
     private enum StopIntent { case pause, finish }
     private var segments: [Segment] = []
     private var activeSegment: Segment?
     private var stopIntent: StopIntent?
+    private var activeStartedAt: TimeInterval?
+    private var progressTimer: Timer?
 
     override init() {
         super.init()
@@ -162,6 +166,7 @@ final class CameraService: NSObject, ObservableObject {
         currentWord = 0
         segments = []
         segmentCount = 0
+        recordedDuration = 0
         microphoneActive = false
         voiceDetected = false
         isStarting = true
@@ -206,6 +211,7 @@ final class CameraService: NSObject, ObservableObject {
 
     func pause() {
         guard isRecording else { return }
+        stopProgressClock()
         isRecording = false
         isFinalizingSegment = true
         stopIntent = .pause
@@ -220,6 +226,7 @@ final class CameraService: NSObject, ObservableObject {
     func finish() {
         guard !isSaving && !isFinalizingSegment && !isStarting else { return }
         if isRecording {
+            stopProgressClock()
             isRecording = false
             isFinalizingSegment = true
             stopIntent = .finish
@@ -238,6 +245,7 @@ final class CameraService: NSObject, ObservableObject {
         guard isPaused && !isFinalizingSegment && !isSaving, let removed = segments.popLast() else { return }
         try? FileManager.default.removeItem(at: removed.url)
         segmentCount = segments.count
+        recordedDuration = segments.reduce(0) { $0 + $1.duration }
         follower.seek(to: removed.startWord)
         currentWord = removed.startWord
         if segments.isEmpty {
@@ -260,6 +268,7 @@ final class CameraService: NSObject, ObservableObject {
             for segment in segments { try? FileManager.default.removeItem(at: segment.url) }
             segments = []
             segmentCount = 0
+            recordedDuration = 0
             currentWord = 0
             follower.seek(to: 0)
             lastVideo = finalURL
@@ -276,6 +285,7 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func shutdown() {
+        stopProgressClock()
         speechInput.end()
         recognitionTask?.cancel()
         recognitionTask = nil
@@ -310,6 +320,28 @@ final class CameraService: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func startProgressClock() {
+        progressTimer?.invalidate()
+        activeStartedAt = ProcessInfo.processInfo.systemUptime
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateProgressClock() }
+        }
+    }
+
+    private func updateProgressClock() {
+        guard let activeStartedAt else { return }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - activeStartedAt)
+        activeSegment?.duration = elapsed
+        recordedDuration = segments.reduce(0) { $0 + $1.duration } + elapsed
+    }
+
+    private func stopProgressClock() {
+        updateProgressClock()
+        activeStartedAt = nil
+        progressTimer?.invalidate()
+        progressTimer = nil
     }
 
     private func saveToPhotos(_ url: URL) async {
@@ -388,11 +420,17 @@ extension CameraService: AVCaptureAudioDataOutputSampleBufferDelegate {
 
 extension CameraService: AVCaptureFileOutputRecordingDelegate {
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, from connections: [AVCaptureConnection]) {
-        Task { @MainActor in self.isStarting = false; self.isRecording = true; self.status = "Recording" }
+        Task { @MainActor in
+            self.isStarting = false
+            self.isRecording = true
+            self.startProgressClock()
+            self.status = "Recording"
+        }
     }
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         Task { @MainActor in
+            self.stopProgressClock()
             self.isRecording = false
             self.isStarting = false
             self.isFinalizingSegment = false
@@ -401,6 +439,7 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
             if let error {
                 if let active = self.activeSegment { try? FileManager.default.removeItem(at: active.url) }
                 self.activeSegment = nil
+                self.recordedDuration = self.segments.reduce(0) { $0 + $1.duration }
                 self.isPaused = !self.segments.isEmpty
                 self.status = "Recording error: \(error.localizedDescription)"
                 return
@@ -413,7 +452,7 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
             if intent == .finish { await self.exportSegments() }
             else {
                 self.isPaused = !self.segments.isEmpty
-                self.status = "Paused · tap Record to continue"
+                self.status = "Paused · tap Resume to continue"
             }
         }
     }
